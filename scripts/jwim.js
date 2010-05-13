@@ -3,7 +3,7 @@
 	
 	Copyright (c) 2010 Filippo Cavallarin - poplix@papuasia.org
 	
-	Version: beta-0.1 2010-03-25
+	Version: beta-0.2 2010-05-11
 	
 	Licensed under the MIT license http://www.opensource.org/licenses/mit-license.php
 	
@@ -76,11 +76,18 @@ jwim.Manager=function(options){
 		defaultY:10,
 		defaultWidth:500,
 		defaultHeight:350,
+		defaultState:'window',
 		buttonSize:16,
 		shiftOffset:20,
 		bottomMargin:16,
 		movable:true,
-		httpErrorHandler:null
+		httpErrorHandler:null,
+		autoCheckResize:true,
+		containerBoundaries:40,
+		iconWidth:120,
+		resizeIcons:true,
+		afterLoad:null,
+		cacheXHR:false
 	};
 
 	if(options && typeof options == 'object'){
@@ -88,6 +95,8 @@ jwim.Manager=function(options){
 			this.opts[a]=options[a];
 	}
 	
+	if(this.opts.autoCheckResize)
+		jwim.Utils.addEvent(window,'resize',(function(jwm){ return function(){ jwm.checkResize();}})(this));
 };		
 
 
@@ -108,6 +117,9 @@ jwim.Manager.prototype.createWindow=function(opts){
 	var btnUp=function(e){ this.style.opacity='1';};
 
 	if(opts.id && this.getWindow(opts.id) != null) return null;
+	
+	var container= opts.container || this.opts.container;
+	var state = opts.state || this.opts.defaultState;
 	
 	var w = new jwim.Window(opts, this);
 	
@@ -135,8 +147,9 @@ jwim.Manager.prototype.createWindow=function(opts){
 	w.win.style.cssText="z-index:"+this.opts.baseZIndex+";position:absolute;top:"+(w.y)+"px;left:"+(w.x)+"px;";				
 	
 	//margins and position on content are not allowed
+	// IMPORTANT: init width n height
 	w.content.className=this.opts.classContent;
-	w.content.style.cssText='position:relative;margin:0;';
+	w.content.style.cssText='position:relative;margin:0;width:0px;height:0px';
 
 	
 	w.win.onmousedown=jwim.Callbacks.dragStart(w);
@@ -206,7 +219,7 @@ jwim.Manager.prototype.createWindow=function(opts){
 	}		
 		
 			
-	this.opts.container.appendChild(w.win);
+	container.appendChild(w.win);
 	w.components.window=w.win;
 	w._setSize(w.w,w.h,false,'');
 	this.windows.push(w);
@@ -214,7 +227,7 @@ jwim.Manager.prototype.createWindow=function(opts){
 	if(this.opts.taskbar && this.opts.alwaysShowIcons)w._createTaskbarIcon();
 	
 	this._selectWindow(w,true);
-	if(opts.state) w.setState(opts.state);
+	if(state != 'window')w.setState(state);
 	return w;
 	
 };
@@ -244,7 +257,7 @@ jwim.Manager.prototype.getAllWindows=function(){
 
 jwim.Manager.prototype.getContainerHeight=function(){
 	if(this.opts.container == document.body)
-		return (window.innerHeight || document.documentElement.clientHeight || document.body.clientHeight);
+		return jwim.Utils.getBodySize().height;
 		
 	return this.opts.container.clientHeight;
 
@@ -253,12 +266,27 @@ jwim.Manager.prototype.getContainerHeight=function(){
 
 jwim.Manager.prototype.getContainerWidth=function(){
 	if(this.opts.container == document.body)
-		return (window.innerWidth || document.documentElement.clientWidth || document.body.clientWidth);
+		return jwim.Utils.getBodySize().width;
 
 	return this.opts.container.clientWidth;
 };
 
 
+jwim.Manager.prototype.checkResize=function(){
+	for(var a=0; a< this.windows.length;a++){
+		if(this.windows[a].state != 'maximized')continue;
+	
+		var Dw= this.windows[a].win.offsetWidth - parseInt(this.windows[a].win.style.width);
+		var Dh= this.windows[a].win.offsetHeight - parseInt(this.windows[a].win.style.height);	
+		var w=this.windows[a].getContainerWidth()  - Dw;
+		var h=this.windows[a].getContainerHeight() - Dh;
+		
+		this.windows[a]._setSize(w,h,false,'resize');	
+	}
+	
+	if(this.opts.taskbar && this.opts.resizeIcons)
+		this._resizeIcons();
+}
 
 
 jwim.Manager.prototype._getNewId=function(){
@@ -270,7 +298,8 @@ jwim.Manager.prototype._getNewId=function(){
 
 jwim.Manager.prototype._selectWindow=function(win){
 	
-	if(win == this.selectedWindow)return;
+	// if win.scope==null the win has been closed and this is the result of event propagation
+	if(win == this.selectedWindow || !win.scope)return;
 	if(this.selectedWindow && this.selectedWindow.ondeselect)
 		this.selectedWindow.ondeselect();
 		
@@ -312,7 +341,8 @@ jwim.Manager.prototype._destroyWindow=function(w){
 	for(var a=0; a< this.windows.length; a++){
 		if(this.windows[a]==w){	
 			if( !this.windows[a]._unload(false)) return false;
-			this.opts.container.removeChild(this.windows[a].win);
+			//this.opts.container.removeChild(this.windows[a].win);
+			this.windows[a].getContainer().removeChild(this.windows[a].win);
 			if(this.windows[a].taskbarIcon != null){				
 				this.windows[a]._removeTaskbarIcon();
 			}
@@ -326,9 +356,10 @@ jwim.Manager.prototype._destroyWindow=function(w){
 				
 			closed.scope=null;
 			closed=null;	
-		
+			
 			var fw=this._getFirstVisibleWindow();
 			if(fw)fw.select();
+			
 			return ;
 		}
 	}
@@ -347,7 +378,35 @@ jwim.Manager.prototype._getFirstVisibleWindow=function(){
 };
 
 
+jwim.Manager.prototype._resizeIcons=function(){
 
+	function gs(e,p){
+		var n = parseInt(jwim.Utils.getStyle(e,p));
+		return ( isNaN(n) ? 0 : n );
+	}
+	
+	var a;
+	var icns=[];
+	//save icons attached to default icons container
+	for(a=0; a<this.windows.length;a++){
+		if(this.windows[a].taskbarIcon && this.windows[a].taskbarIcon.parentNode == this.opts.taskbar)
+			icns.push(this.windows[a].taskbarIcon);
+	}
+	
+	if(icns.length < 1)return;
+	
+	var tbw = this.opts.taskbar.clientWidth - gs(this.opts.taskbar,'padding-left') - gs(this.opts.taskbar,'padding-right') - 1;
+	var iw = parseInt(tbw/icns.length);
+	
+	for(a=0; a<icns.length;a++){		
+		var Dw = ( icns[a].offsetWidth + gs(icns[a],'margin-left') + gs(icns[a],'margin-right') ) - gs(icns[a],'width');		
+		if( (this.opts.iconWidth + Dw) > iw){
+			icns[a].style.width=(iw-Dw-1)+'px';		
+		} else {
+			icns[a].style.width = this.opts.iconWidth + 'px';
+		}
+	}
+}	
 
 
 
@@ -377,7 +436,9 @@ jwim.Window=function(opts,manager){
 	this.content=null;
 	this.resizer=null;
 	this.taskbarIcon=null;
+	this.taskbarIconSpan=null;
 	this.currentUrl=null;
+	this.afterLoad= opts.afterLoad || manager.opts.afterLoad ;
 	
 	//initizlized via in-win scripts		
 	this.onunload = null;
@@ -479,18 +540,34 @@ jwim.Window.prototype.select=function(){
 
 
 jwim.Window.prototype.setContent=function(html,element){
-	var js, re = /<script\b[\s\S]*?>([\s\S]*?)<\/script/ig;
+	//var js, re = new RegExp('<script\b[\s\S]*?>([\s\S]*?)<\/script','gi');
+	// testre doesnt need the g modifier...
+	var js, testre = /<script\b[\s\S]*?>([\s\S]*?)<\/script/i;
+	var afterLoad=null;
 	
 	if(!element){
-		if( !this._unload(true) ) return false; 
+		if( !this._unload(true) ) return false; 		
 		element=this.content;
+		afterLoad=this.afterLoad;
 	}
 	
 	element.innerHTML=html.replace(/<script.*?>[\s\S]*?<\/.*?script>/gi,"");			
 	this.convertElementsAttributes(element);
-	while (js = re.exec(html)) {
-		this.scope._eval(js[1]);
+	
+	// testre is a dirty hack to work around a FF bug
+	// it seems that FF doesnt allow nested setContent calls (i mean calling setContent from a 
+	// content loaded with setContent).. Infact the second (innermost) call will always get
+	// the re.exec of the prv call even if html doesnt contain scripts . . mha.. 
+	// The nature of this bug is not exactly clear to me.. but this works
+	if(testre.test(html)){
+		var re = /<script\b[\s\S]*?>([\s\S]*?)<\/script/gi;
+		while (js = re.exec(html)) {
+			this.scope._eval(js[1]);
+		}
 	}
+	
+	if(afterLoad)
+		afterLoad(this);
 	
 };
 
@@ -538,7 +615,7 @@ jwim.Window.prototype.convertElementsAttributes=function(o){
 
 
 
-jwim.Window.prototype.loadUrl=function(url,onerror){
+jwim.Window.prototype.loadUrl=function(url,onload){
 	var req = false;
 
 	//do not clear events here! if http error they must be preserverd
@@ -571,13 +648,16 @@ jwim.Window.prototype.loadUrl=function(url,onerror){
 	}
 	req.onreadystatechange = (function(w) {return function(){
 		if (req.readyState == 4) {
-			w.hideLoading();
+			w.showLoading(false);
 			switch (req.status) {
 				case 200: // OK
 					// ensure onunlond wont be called twice
 					w.onunload=null;
 					w.currentUrl=url;
-					w.setContent(req.responseText);	 			
+					w.setContent(req.responseText);	 	
+					if(onload)
+						onload(w);
+						
 					break;
 				default:
 					if(w.onhttperror){
@@ -594,19 +674,23 @@ jwim.Window.prototype.loadUrl=function(url,onerror){
 			}
 		}
 	}})(this);
+	
+	// cache prevention code ripped from jquery 
+	if(!this.manager.opts.cacheXHR){
+		var ts = (new Date).getTime();	
+		// try replacing _= if it is there
+		var ret = url.replace(/(\?|&)_=.*?(&|$)/, "$1_=" + ts + "$2");
+		// if nothing was replaced, add timestamp to the end
+		url = ret + ((ret === url) ? ( (/\?/).test(url) ? "&" : "?") + "_=" + ts : "");
+	}	
 	req.open("GET", url, true);
 	req.send("");
 	
 };
 
 
-jwim.Window.prototype.showLoading=function(){
-	this.loading.style.visibility='inherit';
-};
-
-
-jwim.Window.prototype.hideLoading=function(){
-	this.loading.style.visibility='hidden';
+jwim.Window.prototype.showLoading=function(show){
+	this.loading.style.visibility = (typeof show == 'undefined' || show ? 'inherit' : 'hidden');
 };
 
 
@@ -616,7 +700,7 @@ jwim.Window.prototype.setTitle=function(title){
 		this.titleText=title;
 	}
 	if(this.taskbarIcon){
-		this.taskbarIcon.innerHTML=title;
+		this.taskbarIconSpan.innerHTML=title;
 		this.taskbarIcon.setAttribute('title',title);
 	}
 };
@@ -678,8 +762,9 @@ jwim.Window.prototype.getTitle=function(){
 };
 
 
-jwim.Window.prototype.getCurrentUrl=function(){ 
-	return this.currentUrl;
+jwim.Window.prototype.getCurrentUrl=function(full){ 
+	// if not full remove anti-caching url variable
+	return (this.manager.opts.cacheXHR || full ? this.currentUrl : this.currentUrl.replace(/(\?|&)_=.*/,'') );
 };
 
 
@@ -703,8 +788,38 @@ jwim.Window.prototype.getContentHeight=function(){
 };
 
 
+jwim.Window.prototype.getContainer=function(){ 
+	return this.win.parentNode;
+};
+
+
+jwim.Window.prototype.getContainerWidth=function(){ 
+	var c =this.getContainer();
+	if( c == document.body)
+		return jwim.Utils.getBodySize().width;
+		
+	return c.clientWidth;
+};
+
+
+jwim.Window.prototype.getContainerHeight=function(){ 
+	var c =this.getContainer();
+	if( c == document.body)
+		return jwim.Utils.getBodySize().height;
+		
+	return c.clientHeight;
+};
+
+
+jwim.Window.prototype.attachTo=function(el){
+	el = el || this.manager.opts.container;
+	el.appendChild(this.win);
+};
+
+
 
 jwim.Window.prototype._maximize=function(){
+	
 	if(this.state != 'maximized'){
 		var w,h;
 		var Dw= this.win.offsetWidth - parseInt(this.win.style.width);
@@ -715,12 +830,13 @@ jwim.Window.prototype._maximize=function(){
 		this.win.style.left=0+'px';
 		this.x = this.y = 1;
 		this.state='maximized'; 
-		w=this.manager.getContainerWidth()  - Dw;
-		h=this.manager.getContainerHeight() - Dh;
+		w=this.getContainerWidth()  - Dw;
+		h=this.getContainerHeight() - Dh;
 		this._setSize(w,h,false,'maximize');
 
 	} else {
 		this.state='window';
+		//alert(this.userW);
 		this._setSize(this.userW, this.userH,false,'restore');
 		this._setPosition(this.userX,this.userY);
 	}
@@ -728,17 +844,15 @@ jwim.Window.prototype._maximize=function(){
 };
 
 
+// action is used to tell enevn handler what fired the event.. if action=='' event is NOT fired
 jwim.Window.prototype._setSize=function(w,h,isResize,action){
 	var off=0;
 	this.win.style.height = h +'px';
 	this.win.style.width = w +'px';
 
-	this.content.style.height = '0px';
-	this.content.style.width = '0px';
-	
-	// here offsetWidth is computed (due to init of content.style.width)
-	var contw = w - this.content.offsetWidth ;
-	var conth = h - this.content.offsetHeight  - this.manager.opts.bottomMargin - this.content.offsetTop;
+
+	var contw = w - (this.content.offsetWidth - parseInt(this.content.style.width));
+	var conth = h - (this.content.offsetHeight-parseInt(this.content.style.height))  - this.manager.opts.bottomMargin - this.content.offsetTop;
 	
 	this.content.style.height = conth +'px';
 	this.content.style.width = contw + 'px';
@@ -747,7 +861,7 @@ jwim.Window.prototype._setSize=function(w,h,isResize,action){
 		this.h=h;
 	}
 	
-	if(this.onresize) 
+	if(action && this.onresize) 
 		this.onresize(w,h,action);
 
 }
@@ -796,12 +910,17 @@ jwim.Window.prototype._createTaskbarIcon=function(){
 	if(!this.manager.opts.taskbar)return;
 	//var width=this.manager.opts.iconWidth;
 	this.taskbarIcon=document.createElement('div');
+	this.taskbarIconSpan=document.createElement('span');
 	this.taskbarIcon.className=this.manager.opts.classIcon;
-	this.taskbarIcon.innerHTML=this.titleText;
+	this.taskbarIconSpan.innerHTML=this.titleText;
 	this.taskbarIcon.setAttribute('title',this.titleText);
+	this.taskbarIcon.style.width=this.manager.opts.iconWidth + 'px';
 	this.taskbarIcon.onclick=(function(w){ return function(e){ w.select(); }})(this);
+	this.taskbarIcon.appendChild(this.taskbarIconSpan);
 	this.manager.opts.taskbar.appendChild(this.taskbarIcon);
 	this.components.icon=this.taskbarIcon;
+	if(this.manager.opts.resizeIcons)
+		this.manager._resizeIcons();
 
 };
 
@@ -810,6 +929,7 @@ jwim.Window.prototype._removeTaskbarIcon=function(){
 	// note that taskbaricon may be attached somewhere else at runtime
 	this.taskbarIcon.parentNode.removeChild(this.taskbarIcon);
 	this.taskbarIcon=null;
+	if(this.manager.opts.resizeIcons) this.manager._resizeIcons();
 };
 
 
@@ -869,6 +989,24 @@ jwim.Utils.removeEvent=function(obj, name, callback){
 };
 
 
+jwim.Utils.getBodySize=function(){
+	var w = (window.innerWidth  || document.documentElement.clientWidth  || document.body.clientWidth);
+	var h = (window.innerHeight || document.documentElement.clientHeight || document.body.clientHeight);
+	
+	return {width:w, height:h};
+};
+
+
+jwim.Utils.getStyle=function(el,sp){
+	if (el.currentStyle){
+		// convert to camel.. ripped somewhere..
+		var spc=sp.replace(/-([a-z])/ig, function(a,l) {return l.toUpperCase();});
+		return el.currentStyle[sp] || el.currentStyle[spc];
+	}
+	else if (window.getComputedStyle)
+		return document.defaultView.getComputedStyle(el,null).getPropertyValue(sp);
+	return null;
+};
 
 
 
@@ -879,11 +1017,26 @@ jwim.Callbacks.move = function(wm){return function(e){
 	var xy, x, y;
 	if(wm.draggingWin==null)return;
 	if(!e)var e = window.event;
+	wm.draggingWin.state='window'; // not in dragStart,not in dragStop .. HERE!
 	xy=jwim.Utils.getEventXY(e);
 	wm.mouse.cur.x = xy.x;
 	wm.mouse.cur.y = xy.y;
 	y = (wm.mouse.cur.y - wm.mouse.click.y);
 	x = (wm.mouse.cur.x - wm.mouse.click.x);
+	if(wm.opts.containerBoundaries > 0){
+		// these vals may be cached while moving..
+		var minx=-1*(wm.draggingWin.getWidth() - wm.opts.containerBoundaries);
+		var maxx=wm.draggingWin.getContainerWidth() - wm.opts.containerBoundaries;
+		var maxy=wm.draggingWin.getContainerHeight() - wm.opts.containerBoundaries;
+		
+		if(x < minx)x = minx;
+		if(x > maxx)x = maxx;		
+		if(y > maxy)y = maxy;
+	}
+	if(wm.opts.containerBoundaries > -1){		
+		if(y < 0) y = 0;
+	}
+	
 	wm.draggingWin.win.style.top  = y + 'px';
 	wm.draggingWin.win.style.left = x + 'px';
 
@@ -895,6 +1048,7 @@ jwim.Callbacks.move = function(wm){return function(e){
 jwim.Callbacks.resize = function(wm){return function(e){
 	var xy,w,h;
 	if(wm.draggingWin==null)return;
+	wm.draggingWin.state='window'; // not in dragStart,not in dragStop .. HERE!
 	if(!e)var e = window.event;
 	xy=jwim.Utils.getEventXY(e);
 	wm.mouse.cur.x = xy.x;
@@ -905,24 +1059,24 @@ jwim.Callbacks.resize = function(wm){return function(e){
 	if(h<60)h=60;
 	wm.draggingWin._setSize(w,h,true,'resize');
 }};
-	
+
 
 jwim.Callbacks.dragStop=function(wm){return function(){
 
 	if(wm.draggingWin ==  null) return;
-	wm.draggingWin.userW = wm.draggingWin.w = parseInt(wm.draggingWin.win.style.width);
-	wm.draggingWin.userH = wm.draggingWin.h = parseInt(wm.draggingWin.win.style.height);
-	
-	wm.draggingWin.userX = wm.draggingWin.x = parseInt(wm.draggingWin.win.style.left);
-	wm.draggingWin.userY = wm.draggingWin.y = parseInt(wm.draggingWin.win.style.top);
-	
+	if(wm.draggingWin.state=='window'){ // if state=='window'  resize or move have been called
+		wm.draggingWin.userW = wm.draggingWin.w = parseInt(wm.draggingWin.win.style.width);
+		wm.draggingWin.userH = wm.draggingWin.h = parseInt(wm.draggingWin.win.style.height);
+		
+		wm.draggingWin.userX = wm.draggingWin.x = parseInt(wm.draggingWin.win.style.left);
+		wm.draggingWin.userY = wm.draggingWin.y = parseInt(wm.draggingWin.win.style.top);
+	}	
 	jwim.Utils.removeEvent(document,'mousemove',wm.moveCallback);
 	jwim.Utils.removeEvent(document,'mousemove',wm.resizeCallback);
 	jwim.Utils.removeEvent(document,'mouseup',wm.dragStop);
 	
-	wm.draggingWin.state='window';			
-	if(document.onselectstart)
-		document.onselectstart=null;
+	if(typeof document.onselectstart != 'undefined')
+		jwim.Utils.removeEvent(document,'selectstart',jwim.Callbacks.onSelectStart);
 	
 	wm.draggingWin=null;
 
@@ -947,7 +1101,7 @@ jwim.Callbacks.dragStart=function(w){ return function(e){
 		case w.win:
 		case w.title:
 		case w.titleSpan:
-		case w.resizer:
+		case w.resizer:			
 			w.manager.draggingWin=w;
 			xy=jwim.Utils.getEventXY(e);
 			w.manager.mouse.click.x= xy.x;
@@ -961,11 +1115,19 @@ jwim.Callbacks.dragStart=function(w){ return function(e){
 			}
 			jwim.Utils.addEvent(document,'mousemove',ef);
 			jwim.Utils.addEvent(document,'mouseup',w.manager.dragStop);
+			
 			if(typeof document.onselectstart != 'undefined')
-				document.onselectstart=function(){return false};
+				jwim.Utils.addEvent(document,'selectstart',jwim.Callbacks.onSelectStart);
+			
 				
 			return false;
 	}
 
 }};
+
+
+jwim.Callbacks.onSelectStart=function(){
+	return false;
+};
+
 
